@@ -15,6 +15,13 @@ import {
   epochsToDays,
 } from './protocol';
 import { TOTAL_ETH_SUPPLY, SECONDS_PER_EPOCH, EPOCHS_PER_DAY } from './constants';
+import {
+  type FeeRegime,
+  type ExecutionDataPoint,
+  detectRegime,
+  forecastExecutionYield,
+  generateMockExecutionHistory,
+} from './execution';
 
 /**
  * Historical data point for training
@@ -26,6 +33,23 @@ export interface HistoricalDataPoint {
   entryQueueLength: number;
   exitQueueLength: number;
   observedAPR?: number; // Actual observed APR if available
+}
+
+/**
+ * Driver attribution breakdown
+ */
+export interface DriverAttribution {
+  consensusAPR: number; // Base protocol rewards (inverse sqrt of stake)
+  executionAPR: number; // Priority fees + MEV
+  totalAPR: number;
+  // Percentage contribution
+  consensusPct: number;
+  executionPct: number;
+  // Execution breakdown
+  priorityFeesPct: number;
+  mevPct: number;
+  // Regime info
+  feeRegime: 'calm' | 'elevated' | 'hot';
 }
 
 /**
@@ -46,6 +70,8 @@ export interface ForecastPoint {
     trendAdjustment: number;
     queueConstraint: number;
   };
+  // Driver attribution
+  drivers: DriverAttribution;
 }
 
 /**
@@ -55,12 +81,14 @@ export interface ScenarioParams {
   netFlowBias: number; // -1 (bearish) to +1 (bullish) bias on staking demand
   mevMultiplier: number; // 0.5 to 2.0 multiplier on MEV rewards
   queuePressure: number; // Multiplier on queue lengths
+  feeRegimeBias: 'calm' | 'elevated' | 'hot' | 'current'; // Force a fee regime or use current
 }
 
 const DEFAULT_SCENARIO: ScenarioParams = {
   netFlowBias: 0,
   mevMultiplier: 1.0,
   queuePressure: 1.0,
+  feeRegimeBias: 'current',
 };
 
 /**
@@ -171,7 +199,8 @@ export function applyAPRFeedback(
 export function generateForecast(
   history: HistoricalDataPoint[],
   monthsAhead: number,
-  scenario: ScenarioParams = DEFAULT_SCENARIO
+  scenario: ScenarioParams = DEFAULT_SCENARIO,
+  executionHistory?: ExecutionDataPoint[]
 ): ForecastPoint[] {
   if (history.length === 0) {
     throw new Error('No historical data provided');
@@ -197,6 +226,21 @@ export function generateForecast(
   // Calculate max daily change constraint
   const maxDailyChange = getMaxDailyStakeChange(latestState.activeValidators);
 
+  // Generate mock execution history if not provided
+  const execHistory = executionHistory || generateMockExecutionHistory(90, latestState.activeValidators);
+
+  // Detect current fee regime
+  const regimeDetection = detectRegime(execHistory, latestState.activeValidators);
+  const baseRegime = scenario.feeRegimeBias === 'current'
+    ? regimeDetection.currentRegime
+    : scenario.feeRegimeBias;
+
+  // Get current execution yield for regime model
+  const recentExec = execHistory.slice(0, 7);
+  const currentExecYield = recentExec.length > 0
+    ? mean(recentExec.map(d => (d.priorityFeesETH + d.mevRewardsETH) / latestState.activeValidators))
+    : 0.001;
+
   // Generate daily forecasts
   const daysToForecast = monthsAhead * 30;
   const forecasts: ForecastPoint[] = [];
@@ -210,13 +254,39 @@ export function generateForecast(
     const forecastDate = new Date(latestState.timestamp);
     forecastDate.setDate(forecastDate.getDate() + day);
 
-    // Calculate current APR
-    const currentAPR = getRealisticAPR(currentStake);
+    // Calculate consensus APR (base protocol rewards)
+    const consensusAPR = getTheoreticalAPR(currentStake);
+
+    // Forecast execution yield with regime model
+    const execForecast = forecastExecutionYield(
+      currentExecYield,
+      baseRegime,
+      day,
+      currentValidators
+    );
+
+    // Apply scenario multiplier to execution yield
+    const adjustedExecAPR = execForecast.annualizedAPR * scenario.mevMultiplier;
+
+    // Total APR = consensus + execution
+    const totalAPR = consensusAPR + adjustedExecAPR;
+
+    // Calculate driver attribution
+    const drivers: DriverAttribution = {
+      consensusAPR,
+      executionAPR: adjustedExecAPR,
+      totalAPR,
+      consensusPct: (consensusAPR / totalAPR) * 100,
+      executionPct: (adjustedExecAPR / totalAPR) * 100,
+      priorityFeesPct: (execForecast.components.priorityFees / adjustedExecAPR) * (adjustedExecAPR / totalAPR) * 100,
+      mevPct: (execForecast.components.mevRewards / adjustedExecAPR) * (adjustedExecAPR / totalAPR) * 100,
+      feeRegime: execForecast.regime,
+    };
 
     // Calculate expected daily growth with feedback
     let expectedGrowth = applyAPRFeedback(
       trend.dailyGrowthRate + scenario.netFlowBias * maxDailyChange * 0.1,
-      currentAPR
+      totalAPR
     );
 
     // Apply queue constraints
@@ -240,26 +310,26 @@ export function generateForecast(
 
     // Calculate confidence interval based on volatility
     const daysFromStart = day;
-    const uncertaintyGrowth = Math.sqrt(daysFromStart) * trend.volatility * 32; // Scale by ETH per validator
+    const uncertaintyGrowth = Math.sqrt(daysFromStart) * trend.volatility * 32;
     const confidenceMultiplier = 1.96; // 95% confidence
 
     const stakeRatio = getStakeRatio(currentStake);
-    const forecastAPR = getRealisticAPR(currentStake, 0.995, 0.9, 0.05 * scenario.mevMultiplier);
 
     forecasts.push({
       date: forecastDate,
       totalStakedETH: currentStake,
       stakeRatio,
-      forecastAPR,
+      forecastAPR: totalAPR,
       confidence: {
         lower: Math.max(0, currentStake - confidenceMultiplier * uncertaintyGrowth),
         upper: currentStake + confidenceMultiplier * uncertaintyGrowth,
       },
       components: {
-        protocolBase: getTheoreticalAPR(currentStake),
+        protocolBase: consensusAPR,
         trendAdjustment: expectedGrowth,
         queueConstraint: maxDailyChange,
       },
+      drivers,
     });
   }
 
@@ -272,25 +342,32 @@ export function generateForecast(
  */
 export function compareScenarios(
   history: HistoricalDataPoint[],
-  monthsAhead: number
+  monthsAhead: number,
+  executionHistory?: ExecutionDataPoint[]
 ): {
   baseline: ForecastPoint[];
   bullish: ForecastPoint[];
   bearish: ForecastPoint[];
 } {
-  const baseline = generateForecast(history, monthsAhead, DEFAULT_SCENARIO);
+  const baseline = generateForecast(history, monthsAhead, DEFAULT_SCENARIO, executionHistory);
 
   const bullish = generateForecast(history, monthsAhead, {
     netFlowBias: 0.5,
     mevMultiplier: 1.3,
     queuePressure: 1.5,
-  });
+    feeRegimeBias: 'elevated', // Bullish assumes elevated fee environment
+  }, executionHistory);
 
   const bearish = generateForecast(history, monthsAhead, {
     netFlowBias: -0.5,
     mevMultiplier: 0.7,
     queuePressure: 0.5,
-  });
+    feeRegimeBias: 'calm', // Bearish assumes calm fee environment
+  }, executionHistory);
 
   return { baseline, bullish, bearish };
 }
+
+// Re-export execution types for convenience
+export type { FeeRegime, ExecutionDataPoint } from './execution';
+export { detectRegime, generateMockExecutionHistory } from './execution';

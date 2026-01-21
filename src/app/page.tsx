@@ -7,8 +7,16 @@ import { ScenarioSelector } from '@/components/ui/ScenarioSelector';
 import {
   generateForecast,
   compareScenarios,
+  detectRegime,
+  generateMockExecutionHistory,
   type HistoricalDataPoint,
+  type ExecutionDataPoint,
 } from '@/lib/model/forecast';
+import {
+  DriverAttributionChart,
+  DriverSummary,
+  RegimeBadge,
+} from '@/components/charts/DriverAttribution';
 import {
   getNetworkOverview,
   getValidatorQueues,
@@ -42,6 +50,7 @@ export default function Home() {
   } | null>(null);
 
   const [historicalData, setHistoricalData] = useState<HistoricalDataPoint[]>([]);
+  const [executionHistory, setExecutionHistory] = useState<ExecutionDataPoint[]>([]);
 
   // Fetch data on mount
   useEffect(() => {
@@ -117,6 +126,10 @@ export default function Home() {
       }
 
       setHistoricalData(mockHistory);
+
+      // Generate mock execution history
+      const mockExecHistory = generateMockExecutionHistory(90, networkOverview.activeValidators);
+      setExecutionHistory(mockExecHistory);
     }
   }, [networkOverview, historicalData.length]);
 
@@ -125,12 +138,18 @@ export default function Home() {
     if (historicalData.length === 0) return null;
 
     try {
-      return compareScenarios(historicalData, months);
+      return compareScenarios(historicalData, months, executionHistory.length > 0 ? executionHistory : undefined);
     } catch (err) {
       console.error('Forecast error:', err);
       return null;
     }
-  }, [historicalData, months]);
+  }, [historicalData, months, executionHistory]);
+
+  // Current fee regime
+  const currentRegime = useMemo(() => {
+    if (executionHistory.length === 0 || !networkOverview) return null;
+    return detectRegime(executionHistory, networkOverview.activeValidators);
+  }, [executionHistory, networkOverview]);
 
   // Derive current metrics
   const currentMetrics = useMemo(() => {
@@ -259,6 +278,51 @@ export default function Home() {
                   metric="forecastAPR"
                   showConfidence={false}
                 />
+              </div>
+            </section>
+
+            {/* Driver Attribution */}
+            <section className="mb-8">
+              <h2 className="text-lg font-semibold text-gray-300 mb-4">
+                APR Driver Attribution
+                {currentRegime && (
+                  <span className="ml-3">
+                    <RegimeBadge regime={currentRegime.currentRegime} />
+                  </span>
+                )}
+              </h2>
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {/* Current Breakdown */}
+                <div className="rounded-xl border border-gray-700 bg-gray-800/50 p-6">
+                  <h3 className="text-sm font-medium text-gray-400 mb-4">
+                    Current APR Breakdown
+                  </h3>
+                  {forecasts.baseline[0]?.drivers && (
+                    <DriverSummary drivers={forecasts.baseline[0].drivers} />
+                  )}
+                </div>
+
+                {/* Forecast End Breakdown */}
+                <div className="rounded-xl border border-gray-700 bg-gray-800/50 p-6">
+                  <h3 className="text-sm font-medium text-gray-400 mb-4">
+                    {months}-Month Forecast Breakdown
+                  </h3>
+                  {forecasts.baseline[forecasts.baseline.length - 1]?.drivers && (
+                    <DriverSummary drivers={forecasts.baseline[forecasts.baseline.length - 1].drivers} />
+                  )}
+                </div>
+              </div>
+
+              {/* Attribution Chart */}
+              <div className="mt-6 rounded-xl border border-gray-700 bg-gray-800/50 p-6">
+                <h3 className="text-sm font-medium text-gray-400 mb-4">
+                  Driver Contribution (End of Forecast)
+                </h3>
+                {forecasts.baseline[forecasts.baseline.length - 1]?.drivers && (
+                  <DriverAttributionChart
+                    drivers={forecasts.baseline[forecasts.baseline.length - 1].drivers}
+                  />
+                )}
               </div>
             </section>
           </>
