@@ -36,23 +36,24 @@ export function getBaseRewardPerEpoch(
 }
 
 /**
- * Calculate theoretical maximum APR for a validator
- * Assumes perfect attestation and participation
+ * Empirical calibration constant for consensus APR
+ * Derived from historical data: APR ≈ k / sqrt(totalStakedETH)
+ * At 34.5M ETH staked, consensus APR ≈ 2.9%
+ * k = 2.9 * sqrt(34_500_000) ≈ 17,034
+ */
+const CONSENSUS_APR_COEFFICIENT = 17034;
+
+/**
+ * Calculate theoretical consensus layer APR for a validator
+ * Uses empirically-calibrated inverse sqrt relationship
  */
 export function getTheoreticalAPR(totalStakedETH: number): number {
   if (totalStakedETH <= 0) return 0;
 
-  // Base reward for 32 ETH validator per epoch
-  const baseRewardPerEpoch = getBaseRewardPerEpoch(32, totalStakedETH);
-
-  // Total rewards per epoch (attestation rewards are ~4x base reward)
-  const rewardsPerEpoch = baseRewardPerEpoch * BASE_REWARDS_PER_EPOCH;
-
-  // Annual rewards
-  const annualRewards = rewardsPerEpoch * EPOCHS_PER_YEAR;
-
-  // APR as percentage
-  return (annualRewards / 32) * 100;
+  // Empirical formula: APR ≈ k / sqrt(totalStaked)
+  // This accounts for the actual reward distribution mechanism
+  // including attestation, proposer, and sync committee rewards
+  return CONSENSUS_APR_COEFFICIENT / Math.sqrt(totalStakedETH);
 }
 
 /**

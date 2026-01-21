@@ -30,6 +30,7 @@ export default function Home() {
   const [showScenarios, setShowScenarios] = useState(true);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [usingMockData, setUsingMockData] = useState(false);
 
   // Data state
   const [networkOverview, setNetworkOverview] = useState<{
@@ -72,23 +73,24 @@ export default function Home() {
           setHistoricalData(toHistoricalDataPoints(history));
         }
 
-        // If API fails, use mock data
+        // If API fails, use mock data with realistic values
         if (!overview && !queues) {
-          // Generate mock current state
+          setUsingMockData(true);
+          // Generate mock current state (calibrated to Jan 2026 estimates)
           setNetworkOverview({
             activeValidators: 1_078_125,
             totalStakedEth: 34_500_000,
             networkStakingRate: 28.75,
-            avgNetworkApr: 3.8,
-            consensusLayerApr: 3.2,
-            executionLayerApr: 0.6,
+            avgNetworkApr: 3.23, // Matches our model: 2.89% consensus + 0.34% execution
+            consensusLayerApr: 2.89,
+            executionLayerApr: 0.34,
           });
           setQueueStats({
-            beaconchainEntering: 8500,
-            beaconchainExiting: 1200,
+            beaconchainEntering: 2500, // Lower queue in 2026
+            beaconchainExiting: 800,
             churnLimit: 16,
-            avgActivationWaitDays: 5.2,
-            avgExitWaitDays: 0.8,
+            avgActivationWaitDays: 1.5,
+            avgExitWaitDays: 0.5,
           });
         }
       } catch (err) {
@@ -189,9 +191,18 @@ export default function Home() {
                 Ethereum Staking Rate Prediction Model
               </p>
             </div>
-            <div className="text-right text-sm text-gray-500">
-              <p>Data: Rated.network + Beacon Chain</p>
-              <p>Last updated: {new Date().toLocaleString()}</p>
+            <div className="text-right text-sm">
+              {usingMockData ? (
+                <>
+                  <p className="text-yellow-500 font-medium">Using simulated data</p>
+                  <p className="text-gray-500">API unavailable - showing model estimates</p>
+                </>
+              ) : (
+                <>
+                  <p className="text-green-500">Live data from Rated.network</p>
+                  <p className="text-gray-500">Updated: {new Date().toLocaleString()}</p>
+                </>
+              )}
             </div>
           </div>
         </div>
